@@ -187,7 +187,9 @@ function updateAuthUI() {
 const clean = s => s.replace(/[“”"]/g, "").trim();
 async function searchSpotify(r) {
   const tries = [];
-  if (r.artist) tries.push(`track:${clean(r.title)} artist:${clean(r.artist)}`, `${clean(r.artist)} ${clean(r.title)}`);
+  if (r.artist) tries.push(`track:${clean(r.title)} artist:${clean(r.artist)}`, `${clean(r.artist)} ${clean(r.title)}`,
+    // por si el formato estaba al revés (Canción - Artista)
+    `track:${clean(r.artist)} artist:${clean(r.title)}`);
   else tries.push(clean(r.title));
   for (const q of tries) {
     const j = await sp("/search?" + new URLSearchParams({ q, type: "track", limit: "5" }));
@@ -197,12 +199,26 @@ async function searchSpotify(r) {
   }
   return [];
 }
-async function searchApple(r) {
-  const term = `${r.artist} ${r.title}`.trim();
-  const res = await fetch("https://itunes.apple.com/search?" + new URLSearchParams({ term, entity: "song", limit: "5" }));
+// Resultados dependen de la tienda (país): probamos MX, luego ES y US.
+const APPLE_STORES = ["MX", "ES", "US"];
+const strip = s => s.replace(/\s*[\(\[][^\)\]]*[\)\]]/g, "").replace(/\s+(feat\.?|ft\.?)\s.*$/i, "").trim();
+async function itunes(term, country) {
+  const res = await fetch("https://itunes.apple.com/search?" + new URLSearchParams({ term, country, media: "music", entity: "song", limit: "5" }));
   if (!res.ok) throw new Error("iTunes Search " + res.status);
-  const j = await res.json();
-  return j.results.map(t => ({ label: `${t.trackName} — ${t.artistName} (${t.collectionName})`, url: t.trackViewUrl }));
+  return (await res.json()).results || [];
+}
+async function searchApple(r) {
+  const full = `${r.artist} ${r.title}`.trim();
+  const short = `${strip(r.artist)} ${strip(r.title)}`.trim();
+  const terms = short && short !== full ? [full, short] : [full];
+  for (const country of APPLE_STORES) {
+    for (const term of terms) {
+      const items = await itunes(term, country);
+      if (items.length) return items.map(t => ({ label: `${t.trackName} — ${t.artistName} (${t.collectionName}) [${country}]`, url: t.trackViewUrl }));
+      await sleep(120);
+    }
+  }
+  return [];
 }
 
 async function run() {
