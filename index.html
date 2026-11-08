@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111214">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Playlist">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<title>Playlist Importer</title>
+<style>
+  :root { --bg:#111214; --card:#1b1d21; --line:#2b2e34; --txt:#f2f3f5; --mut:#9aa0a9; --acc:#1db954; --bad:#ff6b6b; --warn:#f5b83d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:16px/1.4 -apple-system,system-ui,Segoe UI,Roboto,sans-serif; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  main { max-width:720px; margin:0 auto; padding:16px; }
+  h1 { font-size:22px; margin:8px 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:13px; color:var(--mut); margin:10px 0 4px; }
+  input[type=text], input[type=password], textarea, select { width:100%; background:#0e0f11; color:var(--txt); border:1px solid var(--line); border-radius:10px; padding:10px; font:inherit; }
+  textarea { min-height:180px; resize:vertical; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .row > * { flex:1; }
+  button { background:var(--acc); color:#04140a; border:0; border-radius:10px; padding:12px 16px; font:inherit; font-weight:600; cursor:pointer; }
+  button.sec { background:#2a2d33; color:var(--txt); }
+  button:disabled { opacity:.5; }
+  .seg { display:flex; background:#0e0f11; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .seg button { flex:1; background:transparent; color:var(--mut); border-radius:0; }
+  .seg button.on { background:var(--acc); color:#04140a; }
+  .mut { color:var(--mut); font-size:13px; }
+  code { background:#0e0f11; padding:2px 6px; border-radius:6px; word-break:break-all; }
+  .item { display:grid; grid-template-columns:auto 1fr; gap:8px 10px; padding:10px 0; border-top:1px solid var(--line); }
+  .item:first-child { border-top:0; }
+  .item .q { font-size:13px; color:var(--mut); }
+  .ok { color:var(--acc); } .no { color:var(--bad); } .maybe { color:var(--warn); }
+  progress { width:100%; height:8px; }
+  .hidden { display:none; }
+  a { color:var(--acc); }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎵 Playlist Importer</h1>
+
+  <div class="card" id="setup">
+    <strong>Spotify</strong>
+    <label for="cid">Client ID de tu app en developer.spotify.com</label>
+    <input type="text" id="cid" placeholder="Pega aquí tu Client ID" autocomplete="off" autocapitalize="off">
+    <label>Redirect URI (regístrala tal cual en tu app de Spotify)</label>
+    <code id="redir"></code>
+    <div class="row" style="margin-top:12px">
+      <button id="login">Conectar con Spotify</button>
+      <button id="logout" class="sec hidden">Cerrar sesión</button>
+    </div>
+    <p class="mut" id="status"></p>
+  </div>
+
+  <div class="card">
+    <strong>Destino</strong>
+    <div class="seg" style="margin-top:8px">
+      <button id="t-spotify" class="on">Spotify</button>
+      <button id="t-apple">Apple Music (enlaces)</button>
+    </div>
+    <p class="mut" id="apple-note" style="display:none">Sin cuenta Apple Developer no se pueden crear playlists por API. Esta opción busca cada canción en Apple Music y te da enlaces para abrirlas y agregarlas.</p>
+
+    <label for="name">Nombre de la playlist</label>
+    <input type="text" id="name" placeholder="Mi playlist">
+
+    <label for="order">Formato de cada línea</label>
+    <select id="order">
+      <option value="at">Artista - Canción</option>
+      <option value="ta">Canción - Artista</option>
+    </select>
+
+    <label for="list">Lista (una canción por línea)</label>
+    <textarea id="list" placeholder="Daft Punk - Digital Love&#10;Radiohead - Everything In Its Right Place&#10;Nujabes - Aruarian Dance"></textarea>
+
+    <div class="row" style="margin-top:12px">
+      <button id="go">Buscar canciones</button>
+      <button id="clear" class="sec">Limpiar</button>
+    </div>
+    <progress id="prog" class="hidden" value="0" max="1"></progress>
+  </div>
+
+  <div class="card hidden" id="results">
+    <strong id="summary"></strong>
+    <div id="items"></div>
+    <div class="row" style="margin-top:12px">
+      <button id="create">Crear playlist</button>
+      <button id="copy" class="sec hidden">Copiar enlaces</button>
+    </div>
+    <p class="mut" id="done"></p>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const LS = {
+  get(k){ try { return localStorage.getItem(k); } catch { return null; } },
+  set(k,v){ try { localStorage.setItem(k,v); } catch {} },
+  del(k){ try { localStorage.removeItem(k); } catch {} }
+};
+const REDIRECT = location.origin + location.pathname;
+const SCOPES = "playlist-modify-private playlist-modify-public";
+let target = "spotify";
+let rows = []; // {query, artist, title, cands:[{label, uri|url}], sel:number|-1}
+
+$("redir").textContent = REDIRECT;
+$("cid").value = LS.get("sp_cid") || "";
+
+/* ---------- Parser ---------- */
+function parseLines(text, order) {
+  return text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(raw => {
+    let l = raw.replace(/^\s*(?:\d+[\.\)\-]\s+|[•*\-]\s+)/, "").replace(/^["“]|["”]$/g, "").trim();
+    const m = l.split(/\s+[-–—]\s+|\s*\t\s*/);
+    let artist = "", title = l;
+    if (m.length >= 2) {
+      const a = m[0].trim(), t = m.slice(1).join(" - ").trim();
+      if (order === "at") { artist = a; title = t; } else { artist = t; title = a; }
+    }
+    return { raw, artist, title };
+  });
+}
+
+/* ---------- Spotify auth (PKCE) ---------- */
+const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
+async function startLogin() {
+  const cid = $("cid").value.trim();
+  if (!cid) { $("status").textContent = "Falta el Client ID."; return; }
+  LS.set("sp_cid", cid);
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  const state = b64url(crypto.getRandomValues(new Uint8Array(12)));
+  LS.set("sp_verifier", verifier); LS.set("sp_state", state);
+  const p = new URLSearchParams({ client_id: cid, response_type: "code", redirect_uri: REDIRECT,
+    code_challenge_method: "S256", code_challenge: challenge, scope: SCOPES, state });
+  location.href = "https://accounts.spotify.com/authorize?" + p;
+}
+async function tokenRequest(body) {
+  const r = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(body) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error_description || j.error || "Error de token");
+  LS.set("sp_access", j.access_token);
+  LS.set("sp_exp", String(Date.now() + (j.expires_in - 60) * 1000));
+  if (j.refresh_token) LS.set("sp_refresh", j.refresh_token);
+}
+async function handleCallback() {
+  const q = new URLSearchParams(location.search);
+  if (!q.has("code") && !q.has("error")) return;
+  history.replaceState({}, "", location.pathname);
+  if (q.get("error")) { $("status").textContent = "Spotify: " + q.get("error"); return; }
+  if (q.get("state") !== LS.get("sp_state")) { $("status").textContent = "Estado inválido, intenta de nuevo."; return; }
+  try {
+    await tokenRequest({ grant_type: "authorization_code", code: q.get("code"), redirect_uri: REDIRECT,
+      client_id: LS.get("sp_cid"), code_verifier: LS.get("sp_verifier") });
+  } catch (e) { $("status").textContent = "Error al conectar: " + e.message; }
+}
+async function token() {
+  if (Date.now() < Number(LS.get("sp_exp") || 0)) return LS.get("sp_access");
+  const rt = LS.get("sp_refresh");
+  if (!rt) throw new Error("Conecta Spotify primero.");
+  await tokenRequest({ grant_type: "refresh_token", refresh_token: rt, client_id: LS.get("sp_cid") });
+  return LS.get("sp_access");
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function sp(path, opts = {}) {
+  for (let i = 0; i < 4; i++) {
+    const r = await fetch("https://api.spotify.com/v1" + path, { ...opts,
+      headers: { Authorization: "Bearer " + await token(), "Content-Type": "application/json" } });
+    if (r.status === 429) { await sleep((Number(r.headers.get("Retry-After")) || 2) * 1000 + 300); continue; }
+    if (!r.ok) { let m = r.status; try { m = (await r.json()).error.message; } catch {} throw new Error(`Spotify ${r.status}: ${m}`); }
+    return r.status === 204 ? null : r.json();
+  }
+  throw new Error("Spotify limitó las peticiones; intenta en un minuto.");
+}
+function updateAuthUI() {
+  const on = !!LS.get("sp_refresh");
+  $("login").classList.toggle("hidden", on);
+  $("logout").classList.toggle("hidden", !on);
+  if (on && !$("status").textContent) $("status").textContent = "✓ Spotify conectado.";
+}
+
+/* ---------- Búsqueda ---------- */
+const clean = s => s.replace(/[“”"]/g, "").trim();
+async function searchSpotify(r) {
+  const tries = [];
+  if (r.artist) tries.push(`track:${clean(r.title)} artist:${clean(r.artist)}`, `${clean(r.artist)} ${clean(r.title)}`);
+  else tries.push(clean(r.title));
+  for (const q of tries) {
+    const j = await sp("/search?" + new URLSearchParams({ q, type: "track", limit: "5" }));
+    const items = (j.tracks && j.tracks.items) || [];
+    if (items.length) return items.map(t => ({ label: `${t.name} — ${t.artists.map(a => a.name).join(", ")} (${t.album.name})`, uri: t.uri }));
+    await sleep(80);
+  }
+  return [];
+}
+async function searchApple(r) {
+  const term = `${r.artist} ${r.title}`.trim();
+  const res = await fetch("https://itunes.apple.com/search?" + new URLSearchParams({ term, entity: "song", limit: "5" }));
+  if (!res.ok) throw new Error("iTunes Search " + res.status);
+  const j = await res.json();
+  return j.results.map(t => ({ label: `${t.trackName} — ${t.artistName} (${t.collectionName})`, url: t.trackViewUrl }));
+}
+
+async function run() {
+  const parsed = parseLines($("list").value, $("order").value);
+  if (!parsed.length) return;
+  if (target === "spotify" && !LS.get("sp_refresh")) { $("status").textContent = "Conecta Spotify primero."; return; }
+  $("go").disabled = true; $("results").classList.add("hidden");
+  const prog = $("prog"); prog.classList.remove("hidden"); prog.max = parsed.length; prog.value = 0;
+  rows = [];
+  for (const p of parsed) {
+    let cands = [], err = "";
+    try { cands = target === "spotify" ? await searchSpotify(p) : await searchApple(p); }
+    catch (e) { err = e.message; }
+    rows.push({ ...p, cands, sel: cands.length ? 0 : -1, err });
+    prog.value = rows.length;
+    await sleep(60);
+  }
+  prog.classList.add("hidden"); $("go").disabled = false;
+  render();
+}
+
+function render() {
+  const found = rows.filter(r => r.cands.length).length;
+  $("summary").textContent = `${found} de ${rows.length} encontradas`;
+  $("create").textContent = target === "spotify" ? "Crear playlist en Spotify" : "Mostrar enlaces";
+  $("copy").classList.toggle("hidden", target !== "apple");
+  $("create").classList.toggle("hidden", target !== "spotify");
+  const box = $("items"); box.innerHTML = "";
+  rows.forEach((r, i) => {
+    const d = document.createElement("div"); d.className = "item";
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = r.sel >= 0; cb.disabled = !r.cands.length;
+    cb.onchange = () => { r.sel = cb.checked ? Number(sel.value || 0) : -1; };
+    const right = document.createElement("div");
+    const q = document.createElement("div"); q.className = "q"; q.textContent = r.raw;
+    right.appendChild(q);
+    const sel = document.createElement("select");
+    if (r.cands.length) {
+      r.cands.forEach((c, k) => { const o = document.createElement("option"); o.value = k; o.textContent = c.label; sel.appendChild(o); });
+      sel.onchange = () => { r.sel = Number(sel.value); cb.checked = true; if (target === "apple") link.href = r.cands[r.sel].url; };
+      right.appendChild(sel);
+    } else {
+      const m = document.createElement("div"); m.className = "no"; m.textContent = r.err ? "Error: " + r.err : "No encontrada"; right.appendChild(m);
+    }
+    var link = document.createElement("a");
+    if (target === "apple" && r.cands.length) { link.href = r.cands[0].url; link.target = "_blank"; link.rel = "noopener"; link.textContent = "Abrir en Apple Music"; right.appendChild(link); }
+    d.append(cb, right); box.appendChild(d);
+  });
+  $("results").classList.remove("hidden");
+  $("done").textContent = "";
+}
+
+async function createPlaylist() {
+  const uris = rows.filter(r => r.sel >= 0 && r.cands[r.sel]).map(r => r.cands[r.sel].uri);
+  if (!uris.length) { $("done").textContent = "No hay canciones seleccionadas."; return; }
+  $("create").disabled = true;
+  try {
+    const name = $("name").value.trim() || "Importada " + new Date().toLocaleDateString("es-MX");
+    const pl = await sp("/me/playlists", { method: "POST", body: JSON.stringify({ name, public: false, description: "Creada con Playlist Importer" }) });
+    for (let i = 0; i < uris.length; i += 100)
+      await sp(`/playlists/${pl.id}/items`, { method: "POST", body: JSON.stringify({ uris: uris.slice(i, i + 100) }) });
+    $("done").innerHTML = `✓ Listo: ${uris.length} canciones. <a href="${pl.external_urls.spotify}" target="_blank" rel="noopener">Abrir en Spotify</a>`;
+  } catch (e) { $("done").textContent = "Error: " + e.message; }
+  $("create").disabled = false;
+}
+
+/* ---------- Eventos ---------- */
+function setTarget(t) {
+  target = t;
+  $("t-spotify").classList.toggle("on", t === "spotify");
+  $("t-apple").classList.toggle("on", t === "apple");
+  $("apple-note").style.display = t === "apple" ? "block" : "none";
+  $("results").classList.add("hidden");
+}
+$("t-spotify").onclick = () => setTarget("spotify");
+$("t-apple").onclick = () => setTarget("apple");
+$("login").onclick = startLogin;
+$("logout").onclick = () => { ["sp_access","sp_exp","sp_refresh"].forEach(LS.del); $("status").textContent = "Sesión cerrada."; updateAuthUI(); };
+$("go").onclick = run;
+$("clear").onclick = () => { $("list").value = ""; $("results").classList.add("hidden"); };
+$("create").onclick = createPlaylist;
+$("copy").onclick = async () => {
+  const t = rows.filter(r => r.sel >= 0 && r.cands[r.sel]).map(r => r.cands[r.sel].url).join("\n");
+  try { await navigator.clipboard.writeText(t); $("done").textContent = "Enlaces copiados."; } catch { $("done").textContent = "No se pudo copiar."; }
+};
+
+handleCallback().then(updateAuthUI);
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+</script>
+</body>
+</html>
